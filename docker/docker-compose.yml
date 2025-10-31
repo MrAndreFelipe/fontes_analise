@@ -1,0 +1,48 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg15
+    container_name: cativa_rag_postgres
+    environment:
+      POSTGRES_DB: cativa_rag_db
+      POSTGRES_USER: cativa_user
+      POSTGRES_PASSWORD: cativa_password_2024
+      POSTGRES_HOST_AUTH_METHOD: trust
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../sql:/docker-entrypoint-initdb.d
+      - ../database/backups:/backups
+    restart: unless-stopped
+    command: >
+      postgres
+      -c shared_preload_libraries=vector
+      -c log_statement=all
+      -c log_destination=stderr
+      -c logging_collector=on
+      -c max_connections=200
+      -c shared_buffers=256MB
+      -c effective_cache_size=1GB
+      -c work_mem=64MB
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cativa_user -d cativa_rag_db"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: cativa_rag_pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@cativa.com
+      PGADMIN_DEFAULT_PASSWORD: admin123
+    ports:
+      - "8080:80"
+    depends_on:
+      - postgres
+    restart: unless-stopped
+    profiles:
+      - tools
+
+volumes:
+  postgres_data:

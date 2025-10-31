@@ -1,0 +1,28 @@
+{
+  "users": {
+    "5511987654321@s.whatsapp.net": {
+      "name": "Usuario Exemplo",
+      "clearance_level": "MEDIO",
+      "department": "Vendas",
+      "enabled": true,
+      "added_at": "2025-10-18T11:30:00",
+      "notes": "Usuario de exemplo com nivel medio"
+    },
+    "5511999999999@s.whatsapp.net": {
+      "name": "Admin Exemplo",
+      "clearance_level": "ALTO",
+      "department": "TI",
+      "enabled": true,
+      "added_at": "2025-10-18T11:30:00",
+      "notes": "Administrador com acesso total"
+    }
+  },
+  "admins": [
+    "5511999999999@s.whatsapp.net"
+  ],
+  "metadata": {
+    "created_at": "2025-10-18T11:30:00",
+    "updated_at": "2025-10-18T11:30:00",
+    "version": "1.0"
+  }
+}

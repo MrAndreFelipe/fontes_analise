@@ -1,0 +1,3 @@
+docker compose --profile tools up -d pgadmin
+
+docker compose ps

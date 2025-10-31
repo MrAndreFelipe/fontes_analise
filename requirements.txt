@@ -1,0 +1,26 @@
+# Core dependencies
+python-dotenv==1.0.0
+
+# WhatsApp Integration
+Flask==3.0.0
+waitress==3.0.0
+requests==2.31.0
+
+# Database
+psycopg2-binary==2.9.9
+cx-Oracle==8.3.0
+
+# AI/ML
+openai==1.12.0
+numpy==1.26.3
+
+# Utilities
+python-dateutil==2.8.2
+
+# Testing
+pytest==7.4.3
+pytest-cov==4.1.0
+pytest-mock==3.12.0
+
+# Data Validation
+pydantic==2.5.3
