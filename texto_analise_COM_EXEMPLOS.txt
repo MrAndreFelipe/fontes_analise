@@ -1,0 +1,158 @@
+3.9.2	Testes de Integração
+
+A medição de cobertura de código através de pytest-cov fornece métricas quantitativas da abrangência dos testes, indicando quais linhas, branches e funções são exercitadas durante execução da suite. O sistema alcança cobertura superior a 90% nos módulos críticos de segurança e lógica de negócio conforme reportado no README.md (linhas 295-299): LGPDQueryClassifier atinge 95% de cobertura validando classificação em todos os cenários operacionais incluindo casos extremos e padrões complexos, SQLValidator alcança 98% assegurando que validações de segurança são completamente testadas cobrindo todos os vetores de SQL injection conhecidos e MessageHandler obtém 94% garantindo robustez no processamento de mensagens e tratamento de erros através de múltiplas condições de payload. A meta estabelecida é manter cobertura acima de 80% balanceando custo-benefício: cobertura inferior indica testes insuficientes e alto risco de regressões, cobertura excessivamente alta (>95%) tipicamente requer esforço desproporcional testando casos extremamente improváveis sem ganho significativo de confiabilidade.
+
+Complementando suite de testes automatizados, sistema inclui scripts de validação manual no diretório tests/manual/ que exercitam interações reais com sistemas externos onde automação completa seria excessivamente frágil ou custosa. O script test_oracle_connection_quick.py valida conectividade com Oracle Database estabelecendo conexão usando cx_Oracle, executando query simples SELECT 1 FROM DUAL e verificando retorno de resultados, identificando rapidamente problemas de rede, credenciais incorretas ou configuração TNS inválida que impediriam operação da rota Text-to-SQL. A implementação demonstra validação em quatro etapas:
+
+```python
+# Exemplo: test_oracle_connection_quick.py (linhas 46-73)
+# Etapa 1: Construção do DSN (Data Source Name)
+if service_name:
+    dsn = cx_Oracle.makedsn(host, port, service_name=service_name)
+elif sid:
+    dsn = cx_Oracle.makedsn(host, port, sid=sid)
+
+# Etapa 2: Estabelecimento de conexão
+connection = cx_Oracle.connect(
+    user=user, password=password, dsn=dsn, encoding="UTF-8"
+)
+print("Conexão estabelecida com sucesso!")
+
+# Etapa 3: Validação de query básica
+cursor = connection.cursor()
+cursor.execute("SELECT 1 FROM DUAL")
+result = cursor.fetchone()
+print(f"Teste de query: {result[0]}")
+
+# Etapa 4: Verificação de acesso às views
+cursor.execute("""
+    SELECT COUNT(*) FROM INDUSTRIAL.VW_RAG_VENDAS_ESTRUTURADA 
+    WHERE ROWNUM <= 1
+""")
+result = cursor.fetchone()
+print(f"Acesso à view: OK (count={result[0]})")
+```
+
+A execução bem-sucedida produz output estruturado validando cada etapa:
+
+```
+$ python tests/manual/test_oracle_connection_quick.py
+
+CONFIGURAÇÕES ORACLE DO .ENV
+ORACLE_HOST: 192.168.0.175
+ORACLE_PORT: 1521
+ORACLE_SERVICE_NAME: dbprod
+
+Testando conexão Oracle...
+Usando SERVICE_NAME: dbprod
+Conexão estabelecida com sucesso!
+Teste de query: 1
+Acesso à view: OK (count=1)
+
+TODOS OS TESTES PASSARAM!
+```
+
+O script test_chunks_search.py exercita busca vetorial completa incluindo geração de embedding via OpenAI API através de text-embedding-3-small, consulta PostgreSQL com operador de distância cosseno (<=> implementado por extensão pgvector) aplicando threshold de similaridade mínima de 0.2 e formatação de resultados ordenados por relevância, validando pipeline completo de busca semântica desde embedding até recuperação. A implementação utiliza consulta SQL especializada:
+
+```python
+# Exemplo: test_chunks_search.py (linhas 154-194)
+def search_chunks_by_embedding(self, query: str, limit: int = 5, 
+                               threshold: float = 0.3):
+    # Etapa 1: Geração de embedding da query
+    self.embedding_generator = EmbeddingGenerator()
+    query_embedding = self.embedding_generator.generate_embedding(query)
+    
+    # Etapa 2: Consulta vetorial ao PostgreSQL com pgvector
+    cursor = self.connection.cursor(cursor_factory=RealDictCursor)
+    sql = """
+        SELECT chunk_id, entity, nivel_lgpd,
+               LEFT(content_text, 200) as preview,
+               1 - (embedding <=> %s::vector) as similarity
+        FROM chunks
+        WHERE embedding IS NOT NULL
+        AND 1 - (embedding <=> %s::vector) >= %s
+        ORDER BY embedding <=> %s::vector
+        LIMIT %s
+    """
+    
+    # Etapa 3: Execução com parâmetros vetoriais
+    embedding_list = query_embedding.tolist()
+    cursor.execute(sql, (embedding_list, embedding_list, threshold, 
+                         embedding_list, limit))
+    return cursor.fetchall()
+```
+
+A execução demonstra capacidade de busca semântica com scores de similaridade:
+
+```
+$ python tests/manual/test_chunks_search.py
+
+Total de Chunks: 12,847
+Chunks com Embeddings: 12,847
+
+RESULTADOS DA BUSCA (Busca por Embedding)
+5 resultado(s) encontrado(s):
+
+1. Chunk ID: venda_20231015_001234
+   Entidade: VENDAS
+   LGPD: MEDIO
+   Similaridade: 87.3%
+   Preview: Pedido 843562. Valor: R$ 8.450,00...
+
+2. Chunk ID: venda_20231018_002156
+   Similaridade: 82.1%
+   Preview: Pedido 845123. Valor: R$ 12.300,00...
+```
+
+O script test_embedding_fallback.py simula cenário de falha da rota Text-to-SQL forçando erro ou indisponibilidade do Oracle, verificando que sistema degrada graciosamente ativando fallback automático para busca vetorial (linhas 245-254 do rag_engine.py) e mantendo funcionalidade parcial mesmo quando componente primário está indisponível, demonstrando resiliência arquitetural. A implementação força ativação do fallback:
+
+```python
+# Exemplo: test_embedding_fallback.py (linhas 34-72)
+def test_embedding_search():
+    # Configuração forçando fallback (oracle_config=None)
+    postgres_config = {
+        'host': 'localhost', 'port': 5432,
+        'database': 'cativa_rag_db', 'user': 'cativa_user'
+    }
+    
+    # Inicializa RAG Engine sem Oracle (force fallback)
+    rag = RAGEngine(
+        oracle_config=None,  # Sem Oracle - força embedding fallback
+        postgres_config=postgres_config,
+        use_openai=False
+    )
+    
+    # Processa query - deve usar rota embeddings automaticamente
+    response = rag.process_query("pedido 123456", 
+                                 user_context={'lgpd_clearance': 'ALTO'})
+    
+    # Validação do fallback
+    if response.success:
+        route = response.metadata.get('route')
+        if route == 'embeddings':
+            print("FALLBACK EMBEDDINGS FUNCIONOU!")
+```
+
+A execução demonstra ativação automática do fallback:
+
+```
+$ python tests/manual/test_embedding_fallback.py
+
+TESTE DE BUSCA POR EMBEDDINGS (FALLBACK)
+Inicializando RAG Engine...
+   Oracle: Desabilitado (forçar fallback)
+
+Processando query...
+Resposta gerada!
+   Rota: embeddings
+   Confiança: 0.67
+   Tempo: 0.34s
+   FALLBACK EMBEDDINGS FUNCIONOU!
+   Chunks usados: 5
+
+Fontes (top 3):
+   1. Similaridade: 0.873 | Entidade: VENDAS
+   2. Similaridade: 0.821 | Entidade: VENDAS
+```
+
+Estes testes manuais são executados interativamente por desenvolvedores durante deployment em novos ambientes, troubleshooting de produção quando usuários reportam problemas ou após modificações estruturais que afetam integração entre componentes. Embora não integrados em pipeline CI/CD automatizado devido a dependências de serviços externos configurados e custos de execução, servem como validação rápida de sanidade verificando que conexões estão funcionais e componentes principais respondem adequadamente. Documentação em README.md fornece instruções detalhadas para execução incluindo configuração de ambiente necessária, interpretação de saídas esperadas distinguindo sucesso de falha e troubleshooting de falhas comuns como ORA-12541 (listener inativo), ORA-12154 (service name incorreto) ou erros 401 de OpenAI (API key inválida).

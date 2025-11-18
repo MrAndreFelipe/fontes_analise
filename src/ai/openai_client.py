@@ -55,9 +55,10 @@ class OpenAIClient:
         else:
             self.client = OpenAI(api_key=self.api_key)
         
-        # Modelos utilizados
-        self.embedding_model = "text-embedding-3-small"
-        self.chat_model = "gpt-4o-mini"  # Modelo mais eficiente
+        # Modelos utilizados (com fallback para defaults)
+        import os
+        self.embedding_model = os.getenv('OPENAI_EMBEDDING_MODEL', 'text-embedding-3-small')
+        self.chat_model = os.getenv('OPENAI_MODEL', 'gpt-4o-mini')
         self.embedding_dimensions = 1536
         
         # Cache para embeddings (otimização)

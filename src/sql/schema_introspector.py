@@ -90,12 +90,26 @@ class SchemaIntrospector:
                         'name': 'ANO_VENDA',
                         'type': 'NUMBER',
                         'description': 'Ano da venda (ex: 2025)'
+                    },
+                    {
+                        'name': 'CODIGO_COLECAO',
+                        'type': 'VARCHAR2',
+                        'description': 'Codigo da colecao do produto (ex: 202603, 202504, 202403)',
+                        'notes': 'Formato AAAAMM + sequencial (ano/mes + numero)'
+                    },
+                    {
+                        'name': 'DESCRICAO_COLECAO',
+                        'type': 'VARCHAR2',
+                        'description': 'Nome da colecao (ex: VERAO 2027, ALTO VERAO 2026, TRANSITION 2025)',
+                        'notes': 'Usar UPPER() e LIKE para buscar'
                     }
                 ],
                 'examples': {
                     'DESCRICAO_REGIAO': ['MG', 'SP', 'PR - LONDRINA E', 'PE - SERTAO', 'SUL', 'NORDESTE'],
                     'NOME_REPRESENTANTE': ['JOAO SILVA', 'MARIA SANTOS', 'PEDRO OLIVEIRA'],
-                    'NOME_CLIENTE': ['CONFECCOES ABC LTDA', 'TEXTIL XYZ SA', 'COMERCIO DEF ME']
+                    'NOME_CLIENTE': ['CONFECCOES ABC LTDA', 'TEXTIL XYZ SA', 'COMERCIO DEF ME'],
+                    'CODIGO_COLECAO': ['202603', '202504', '202403', '202304', '202203', '202103', '202003', '201903'],
+                    'DESCRICAO_COLECAO': ['VERAO 2027', 'ALTO VERAO 2026', 'VERAO 2025', 'TRANSITION 2024', 'OUTONO 2024', 'ESSENCIAL', 'CATIVA BEM ESTAR']
                 },
                 'notes': [
                     'Para data de hoje: TRUNC(DATA_VENDA) = TRUNC(SYSDATE)',
@@ -110,7 +124,11 @@ class SchemaIntrospector:
                     '  - NUNCA use LIKE \'%PE%\' (pega PELOTAS, PARANA, etc - falsos positivos)',
                     'Filtros de nomes (NOME_CLIENTE, NOME_REPRESENTANTE):',
                     '  - Use % em ambos lados: UPPER(NOME_CLIENTE) LIKE \'%CONFEC%\'',
-                    '  - Exemplo: UPPER(NOME_REPRESENTANTE) LIKE \'%SILVA%\''
+                    '  - Exemplo: UPPER(NOME_REPRESENTANTE) LIKE \'%SILVA%\'',
+                    'Filtros de colecoes:',
+                    '  - Por codigo exato: CODIGO_COLECAO = \'202603\'',
+                    '  - Por nome: UPPER(DESCRICAO_COLECAO) LIKE \'%VERAO%\'',
+                    '  - Multiplas colecoes: CODIGO_COLECAO IN (\'202603\', \'202504\', \'202403\')'
                 ]
             },
             'VW_RAG_CONTAS_APAGAR': {

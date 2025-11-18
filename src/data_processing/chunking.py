@@ -20,7 +20,7 @@ class ChunkingEngine:
     """
     
     def __init__(self):
-        """Inicializa com configurações do TCC"""
+        """Inicializa com configurações"""
         self.max_tokens = Config.MAX_CHUNK_TOKENS
         self.overlap_tokens = Config.OVERLAP_TOKENS  
         self.min_tokens = Config.MIN_CHUNK_TOKENS

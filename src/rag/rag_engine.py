@@ -23,6 +23,8 @@ from security.lgpd_query_classifier import (
     LGPDLevel,
     LGPDClassification
 )
+from security.lgpd_audit import LGPDAuditLogger
+from security.encryption import AES256Encryptor
 
 # Text-to-SQL
 from sql.text_to_sql_service import TextToSQLService
@@ -88,6 +90,14 @@ class RAGEngine:
         self.lgpd_classifier = LGPDQueryClassifier()
         self.permission_checker = LGPDPermissionChecker()
         
+        # Encryptor para descriptografar chunks sensíveis
+        try:
+            self.encryptor = AES256Encryptor()
+            logger.info("AES-256-GCM encryptor initialized for chunk decryption")
+        except ValueError as e:
+            logger.warning(f"Encryption unavailable: {e}")
+            self.encryptor = None
+        
         # Store oracle_config for later use
         self.oracle_config = oracle_config
         
@@ -122,6 +132,18 @@ class RAGEngine:
             min_connections=2,
             max_connections=10
         )
+        
+        # LGPD Audit Logger
+        self.audit_logger = None
+        if self.db_pool and self.db_pool.postgres_pool:
+            try:
+                from security.lgpd_audit import LGPDAuditLogger
+                conn = self.db_pool.get_postgres_connection()
+                self.audit_logger = LGPDAuditLogger(conn)
+                self.db_pool.return_postgres_connection(conn)
+                logger.info("LGPD Audit Logger initialized")
+            except Exception as e:
+                logger.warning(f"LGPD Audit Logger unavailable: {e}")
         
         # Text-to-SQL Service (Oracle) - Primary route
         # Pass the connection pool for production-ready connection management
@@ -196,16 +218,27 @@ class RAGEngine:
             logger.info(f"LGPD Level: {lgpd_classification.level.value} (confidence: {lgpd_classification.confidence:.2f})")
             
             if not self.permission_checker.check_permission(lgpd_classification.level, user_context):
-                return self._create_permission_denied_response(lgpd_classification, time.time() - start_time)
+                denied_response = self._create_permission_denied_response(lgpd_classification, time.time() - start_time)
+                # Log acesso negado
+                self._log_access_denied(query, lgpd_classification, user_context)
+                return denied_response
             
             # Step 3: Try Text-to-SQL (Oracle) - Primary route
             if self.text_to_sql:
                 logger.info("Attempting Text-to-SQL route (Oracle)...")
-                sql_response = self._try_text_to_sql(query, lgpd_classification)
+                sql_response = self._try_text_to_sql(query, lgpd_classification, conversation_history)
+                
+                # Check if question is out of scope
+                if sql_response and sql_response.metadata.get('out_of_scope'):
+                    logger.info("Query out of scope, returning error message")
+                    return sql_response  # Return error message, don't fallback
+                
                 if sql_response:
-                    logger.info("[OK] Response generated via Text-to-SQL")
+                    logger.info("Response generated via Text-to-SQL")
                     self._cache_response(cache_key, sql_response)
                     self._audit_query(query, lgpd_classification, sql_response, user_context)
+                    # Log acesso LGPD
+                    self._log_access_lgpd(query, lgpd_classification, sql_response, user_context, start_time)
                     return sql_response
                 logger.warning("Text-to-SQL returned no results")
             
@@ -213,9 +246,11 @@ class RAGEngine:
             logger.info("Attempting embeddings fallback (PostgreSQL)...")
             embedding_response = self._try_embedding_search(query, lgpd_classification, user_context, conversation_history)
             if embedding_response:
-                logger.info("[OK] Response generated via embeddings")
+                logger.info("Response generated via embeddings")
                 self._cache_response(cache_key, embedding_response)
                 self._audit_query(query, lgpd_classification, embedding_response, user_context)
+                # Log acesso LGPD
+                self._log_access_lgpd(query, lgpd_classification, embedding_response, user_context, start_time)
                 return embedding_response
             
             # Step 5: No results from any route
@@ -226,7 +261,7 @@ class RAGEngine:
             logger.error(f"Error processing query: {e}", exc_info=True)
             return RAGResponse(
                 success=False,
-                answer="Ops! Algo deu errado ao processar sua solicitação. Por favor, tente novamente.",
+                answer="Ocorreu um erro ao processar sua solicitação. Por favor, tente novamente.",
                 confidence=0.0,
                 sources=[],
                 metadata={'error': str(e)},
@@ -235,21 +270,62 @@ class RAGEngine:
                 requires_human_review=True
             )
     
-    def _try_text_to_sql(self, query: str, lgpd: LGPDClassification) -> Optional[RAGResponse]:
+    def _try_text_to_sql(self, query: str, lgpd: LGPDClassification, conversation_history: Optional[List[Dict]] = None) -> Optional[RAGResponse]:
         """
         Try Text-to-SQL route (Oracle)
+        
+        Args:
+            query: Pergunta do usuario
+            lgpd: Classificacao LGPD
+            conversation_history: Historico recente da conversa
         
         Returns RAGResponse if successful, None otherwise
         """
         try:
-            result = self.text_to_sql.generate_and_execute(query, limit=10)
+            result = self.text_to_sql.generate_and_execute(query, conversation_history=conversation_history, limit=10)
+            
+            # Check if query is out of scope
+            if result and result.get('error') == 'OUT_OF_SCOPE':
+                return RAGResponse(
+                    success=False,
+                    answer=(
+                        "Desculpe, essa pergunta está fora do meu escopo de atuação.\n\n"
+                        "Sou especializado em dados empresariais da Cativa Têxtil:\n\n"
+                        "📊 **Vendas e Pedidos**\n"
+                        "   • Faturamento, valores, quantidades\n"
+                        "   • Análises por período, região, cliente\n\n"
+                        "👥 **Clientes e Representantes**\n"
+                        "   • Consultas de nomes, regiões\n"
+                        "   • Performance comercial\n\n"
+                        "💰 **Financeiro**\n"
+                        "   • Contas a pagar/receber\n"
+                        "   • Títulos, vencimentos, saldos\n\n"
+                        "Como posso ajudar com dados da empresa?"
+                    ),
+                    confidence=1.0,
+                    sources=[],
+                    metadata={
+                        'route': 'text_to_sql',
+                        'lgpd_level': lgpd.level.value,
+                        'out_of_scope': True
+                    },
+                    processing_time=0.0,
+                    lgpd_compliant=True,
+                    requires_human_review=False
+                )
             
             if not result or not result.get('success'):
                 return None
             
-            # Log for debugging
-            logger.debug(f"SQL: {result.get('generated_sql', 'N/A')[:200]}")
-            logger.debug(f"Executed: {result.get('executed')}, Rows: {len(result.get('rows', []))}")
+            # Check if query returned any rows
+            rows = result.get('rows', [])
+            if not rows:
+                logger.warning("Text-to-SQL executed successfully but returned 0 rows, triggering fallback")
+                return None
+            
+            # Log SQL gerado (para debug/auditoria)
+            logger.info(f"Generated SQL: {result.get('generated_sql', 'N/A')}")
+            logger.info(f"SQL executed: {result.get('executed')}, rows returned: {len(rows)}")
             
             # Format response (will be formatted by WhatsApp formatter)
             answer = self._format_sql_result(result)
@@ -346,6 +422,7 @@ class RAGEngine:
                 SELECT 
                     chunk_id,
                     content_text,
+                    encrypted_content,
                     1 - (embedding <=> %s::vector) as similarity,
                     entity,
                     nivel_lgpd,
@@ -364,16 +441,20 @@ class RAGEngine:
             
             results = []
             for row in cursor.fetchall():
+                # Descriptografa conteúdo se necessário
+                content_text = self._decrypt_if_needed(row)
+                
                 results.append(SearchResult(
                     chunk_id=row['chunk_id'],
-                    content=row['content_text'],
+                    content=content_text,
                     similarity=float(row['similarity']),
                     entity=row['entity'],
                     nivel_lgpd=row['nivel_lgpd'],
                     metadata={
                         'attributes': row['attributes'],
                         'periodo': row['periodo'],
-                        'source_file': row['source_file']
+                        'source_file': row['source_file'],
+                        'was_encrypted': row.get('encrypted_content') is not None
                     }
                 ))
             
@@ -542,6 +623,103 @@ class RAGEngine:
         """Clear response cache"""
         self.cache.clear()
         logger.info("Cache cleared")
+    
+    def _log_access_lgpd(self, query: str, lgpd: LGPDClassification, 
+                         response: RAGResponse, user_context: Optional[Dict], start_time: float):
+        """Log de acesso LGPD (Art. 37)"""
+        if not self.audit_logger:
+            return
+        
+        try:
+            processing_time_ms = int((time.time() - start_time) * 1000)
+            
+            # Extrai chunks acessados dos sources
+            chunks_accessed = []
+            if response.sources:
+                chunks_accessed = [s.get('chunk_id') for s in response.sources if s.get('chunk_id')]
+            
+            conn = self.db_pool.get_postgres_connection()
+            audit_logger_temp = LGPDAuditLogger(conn)
+            
+            audit_logger_temp.log_access(
+                user_id=user_context.get('user_id', 'unknown') if user_context else 'unknown',
+                user_name=user_context.get('user_name') if user_context else None,
+                user_clearance=user_context.get('lgpd_clearance', 'BAIXO') if user_context else 'BAIXO',
+                query_text=query,
+                query_classification=lgpd.level.value,
+                route_used=response.metadata.get('route', 'unknown'),
+                chunks_accessed=chunks_accessed,
+                success=response.success,
+                processing_time_ms=processing_time_ms
+            )
+            
+            self.db_pool.return_postgres_connection(conn)
+        except Exception as e:
+            logger.error(f"Error logging access to LGPD audit: {e}")
+    
+    def _log_access_denied(self, query: str, lgpd: LGPDClassification, user_context: Optional[Dict]):
+        """Log de acesso negado (LGPD)"""
+        if not self.audit_logger:
+            return
+        
+        try:
+            conn = self.db_pool.get_postgres_connection()
+            audit_logger_temp = LGPDAuditLogger(conn)
+            
+            audit_logger_temp.log_access(
+                user_id=user_context.get('user_id', 'unknown') if user_context else 'unknown',
+                user_name=user_context.get('user_name') if user_context else None,
+                user_clearance=user_context.get('lgpd_clearance', 'BAIXO') if user_context else 'BAIXO',
+                query_text=query,
+                query_classification=lgpd.level.value,
+                route_used='error',
+                success=False,
+                denied_reason=f"Insufficient clearance for {lgpd.level.value} data"
+            )
+            
+            self.db_pool.return_postgres_connection(conn)
+        except Exception as e:
+            logger.error(f"Error logging denied access: {e}")
+    
+    def _decrypt_if_needed(self, chunk_row: Dict) -> str:
+        """
+        Descriptografa chunk se encrypted_content existir
+        
+        Args:
+            chunk_row: Row do banco com content_text e encrypted_content
+        
+        Returns:
+            Texto descriptografado ou content_text original
+        
+        Lógica:
+        1. Se encrypted_content existe e não é None → Descriptografa
+        2. Senão → Usa content_text diretamente
+        """
+        encrypted_content = chunk_row.get('encrypted_content')
+        
+        # Se não há conteúdo criptografado, retorna texto normal
+        if not encrypted_content:
+            return chunk_row.get('content_text', '')
+        
+        # Se encryptor não está disponível, retorna texto normal (fallback)
+        if not self.encryptor:
+            logger.warning(f"Chunk {chunk_row.get('chunk_id')} está criptografado mas encryptor indisponível")
+            return chunk_row.get('content_text', '')
+        
+        # Descriptografa
+        try:
+            # encrypted_content já vem como bytes do PostgreSQL (BYTEA)
+            if isinstance(encrypted_content, memoryview):
+                encrypted_content = bytes(encrypted_content)
+            
+            decrypted_text = self.encryptor.decrypt(encrypted_content)
+            logger.debug(f"Chunk {chunk_row.get('chunk_id')} descriptografado: {len(encrypted_content)} bytes → {len(decrypted_text)} chars")
+            return decrypted_text
+            
+        except Exception as e:
+            logger.error(f"Erro ao descriptografar chunk {chunk_row.get('chunk_id')}: {e}")
+            # Fallback para texto não criptografado
+            return chunk_row.get('content_text', '[ERRO: Conteúdo criptografado ilegível]')
     
     def close(self):
         """Close database connections and connection pools"""

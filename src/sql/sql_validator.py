@@ -33,13 +33,10 @@ class SQLValidator:
     # Objetos permitidos (fully qualified ou não)
     ALLOWED_OBJECTS = [
         'INDUSTRIAL.VW_RAG_VENDAS_ESTRUTURADA',
-        'ANDREF.VW_RAG_VENDAS_ESTRUTURADA',
         'VW_RAG_VENDAS_ESTRUTURADA',
         'INDUSTRIAL.VW_RAG_CONTAS_APAGAR',
-        'ANDREF.VW_RAG_CONTAS_APAGAR',
         'VW_RAG_CONTAS_APAGAR',
         'INDUSTRIAL.VW_RAG_CONTAS_RECEBER',
-        'ANDREF.VW_RAG_CONTAS_RECEBER',
         'VW_RAG_CONTAS_RECEBER'
     ]
 

@@ -79,7 +79,6 @@ data/
 *.csv
 *.xlsx
 *.xls
-*.md
 
 # Credentials and secrets
 credentials.json

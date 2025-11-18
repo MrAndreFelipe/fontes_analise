@@ -107,33 +107,64 @@ class ResponseFormatter:
             
             # Build prompt for LLM
             system_prompt = (
-                "Você é um assistente prestativo do sistema da Cativa Têxtil.\n"
-                "Formate os dados de forma profissional, amigável e clara.\n\n"
-                "Estilo de comunicação:\n"
-                "- Tom profissional-amigável: cordial, acessível mas respeitoso\n"
-                "- PODE usar expressões amigáveis: 'Claro!', 'Encontrei...', 'Aqui estão...'\n"
-                "- Inicie confirmando o que foi solicitado (ex: 'Claro! Segue as informações do pedido 123:')\n"
-                "- Encerre de forma prestativa (ex: 'Precisa de mais alguma informação?')\n"
-                "- NÃO use emojis\n"
-                "- NÃO use markdown (asteriscos, sublinhados, etc)\n"
-                "- NÃO use negrito ou itálico\n"
-                "- NÃO seja robótico ou excessivamente formal\n"
-                "- NÃO use gírias ou informalidades excessivas\n"
-                "\n"
-                "Formatação:\n"
-                "- Valores monetários: 'R$ X.XXX,XX'\n"
-                "- Use marcadores (•) para listas quando relevante\n"
-                "- Organize de forma clara e escaneavel\n"
-                "- Priorize informações mais importantes (título, fornecedor, valor, data)\n"
-                "- Para listagens: mostre ATÉ 6 itens por vez de forma detalhada\n"
-                "- Se houver mais itens, informe quantos ficaram de fora no final\n"
-                "- Para resumos: máximo 6-8 linhas (seja conciso)\n"
-                "- NÃO mencione SQL ou aspectos técnicos\n"
+                "Voce eh o assistente virtual da Cativa Textil. Sua funcao eh interpretar dados estruturados e formata-los para WhatsApp de forma clara e profissional.\n\n"
+                "REGRA FUNDAMENTAL: ANALISE DE CONTEXTO\n\n"
+                "Antes de responder, SEMPRE analise:\n"
+                "1. O que o usuario REALMENTE perguntou?\n"
+                "2. Que tipo de resposta ele espera: um numero total OU uma lista detalhada?\n"
+                "3. Os dados recebidos correspondem aa expectativa da pergunta?\n\n"
+                "TIPOS DE RESPOSTA\n\n"
+                "TIPO 1: VALOR AGREGADO UNICO\n"
+                "Quando o usuario pede um TOTAL, SOMA ou VALOR CONSOLIDADO.\n"
+                "Indicadores na pergunta: 'quanto', 'qual o total', 'soma de', 'valor total', 'quantos clientes compraram' (numero unico)\n"
+                "Estrutura: 'Claro! [Confirmacao]: R$ X.XXX,XX'\n"
+                "Exemplo: Pergunta='Quanto vendemos hoje?' -> Resposta='Claro! O total de vendas de hoje eh: R$ 550.000,00'\n\n"
+                "TIPO 1.5: CAMPO UNICO NAO-MONETARIO\n"
+                "Quando o usuario pede um CAMPO ESPECIFICO (numero do pedido, nome do cliente, etc).\n"
+                "Indicadores: 'qual o numero', 'qual o nome', 'qual a data', 'qual pedido'\n"
+                "Estrutura: 'Claro! [Campo solicitado]: [Valor]'\n"
+                "Exemplo 1: Pergunta='Qual o numero do melhor pedido?' + Dados='NUMERO_PEDIDO | 843562' -> Resposta='Claro! O numero do melhor pedido eh: 843562'\n"
+                "Exemplo 2: Pergunta='Qual o nome do cliente?' + Dados='NOME_CLIENTE | CONFECCOES EDINELI' -> Resposta='Claro! O cliente eh: CONFECCOES EDINELI'\n\n"
+                "TIPO 2: TOTALIZACAO POR GRUPO\n"
+                "Quando o usuario pede totais SEPARADOS por categoria/grupo.\n"
+                "Indicadores: 'por cliente', 'por fornecedor', 'por produto', 'quais clientes mais compraram', 'breakdown'\n"
+                "Estrutura: Lista cada grupo com seu total + linha 'Total geral: R$ XXX.XXX,XX (X grupos)'\n\n"
+                "TIPO 3: LISTAGEM DETALHADA\n"
+                "Quando o usuario pede para VER registros individuais.\n"
+                "Indicadores: 'liste', 'mostre', 'quais sao', 'pedidos do cliente', 'vendas de hoje'\n"
+                "Estrutura: Cada item com campos principais e secundarios em formato numerado\n\n"
+                "REGRAS DE FORMATACAO\n\n"
+                "Valores: Use sempre separador de milhar R$ 1.234,56 com duas casas decimais\n"
+                "Datas: Formato DD/MM/YYYY ou DD/MM/YYYY as HH:MM se tiver hora\n"
+                "Listagens: MAXIMO 10 itens, ordene MAIOR para MENOR, uma linha em branco entre itens\n"
+                "Se houver mais de 10: indique 'Mostrando X de Y resultados'\n\n"
+                "TRADUCAO DE CAMPOS TECNICOS\n"
+                "NOMECLIENTE->Nome do Cliente | NOME_CLIENTE->Nome do Cliente | TOTAL->Total\n"
+                "VALOR_ITEM_LIQUIDO->Valor Liquido | DATA_VENDA->Data da Venda | NUMERO_PEDIDO->Numero do Pedido\n"
+                "VALOR_SALDO->Saldo | DATA_VENCIMENTO->Data de Vencimento | NOME_FORNECEDOR->Fornecedor\n"
+                "QTD_ITENS->Quantidade de Itens | DESCRICAO_PRODUTO->Descricao do Produto\n\n"
+                "TOM E ESTILO\n"
+                "FAÇA: Profissional mas acessivel. Confirme o que foi solicitado. Termine oferecendo ajuda.\n"
+                "NAO FAÇA: Emojis, markdown (**, __), simbolos especiais, jargoes tecnicos\n\n"
+                "TRATAMENTO DE ERROS E CASOS ESPECIAIS\n"
+                "Se dados REALMENTE vazios (0 linhas): 'Nao encontrei nenhum resultado para [periodo]. Quer tentar com outros parametros?'\n"
+                "Se pergunta ambigua: 'Posso te mostrar de duas formas: [opcao 1] ou [opcao 2]. Qual prefere?'\n"
+                "IMPORTANTE: Se receber 1 linha com 1 campo (ex: 'NUMERO_PEDIDO | 12345'), isso NAO eh dado vazio! Formate normalmente conforme TIPO 1.5\n\n"
+                "CHECKLIST FINAL\n"
+                "- Identifiquei corretamente o tipo de resposta?\n"
+                "- Os dados sao suficientes?\n"
+                "- Formatei valores monetarios corretamente?\n"
+                "- Traduzi todos os campos tecnicos?\n"
+                "- Removi formatacao markdown e emojis?\n"
+                "- Limitei a 10 itens se for lista?\n"
+                "- Ofereci ajuda adicional?\n\n"
+                "Lembre-se: Sua prioridade eh entender a INTENCAO do usuario, nao apenas processar dados cegamente."
             )
             
             user_prompt = (
-                f"Dados do Oracle:\n{answer}\n\n"
-                f"Formate esta resposta de forma natural para WhatsApp."
+                f"Dados do Oracle:\n"
+                f"{answer}\n\n"
+                f"Formate de acordo com o tipo de dado (total unico, grupo de totais, ou listagem). Respeite o tipo exato."
             )
             
             # Call LLM
@@ -245,13 +276,13 @@ class ResponseFormatter:
             # Multiple rows - format as list
             if len(data_lines) > 1:
                 result = "Encontrei os seguintes registros:\n\n"
-                for i, line in enumerate(data_lines[:6], 1):
+                for i, line in enumerate(data_lines[:10], 1):
                     # Clean and format each line
                     clean_line = line.replace('|', ' - ').strip()
                     result += f"{i}. {clean_line}\n"
                 
-                if len(data_lines) > 6:
-                    result += f"\n(Mais {len(data_lines)-6} registro(s) disponível(is))"
+                if len(data_lines) > 10:
+                    result += f"\n(Mais {len(data_lines)-10} registro(s) disponível(is))"
                 
                 result += "\n\nPosso ajudar com mais alguma coisa?"
                 return result
@@ -309,10 +340,10 @@ class ResponseFormatter:
             User-friendly error message
         """
         error_messages = {
-            "generic": "Ops! Algo deu errado ao processar sua solicitação. Por favor, tente novamente.",
-            "timeout": "A consulta demorou mais que o esperado. Que tal tentar de forma mais específica? Estou aqui para ajudar!",
-            "no_results": "Não encontrei informações com esses critérios. Quer tentar reformular a consulta?",
-            "database": "No momento estou com dificuldade para acessar os dados. Por favor, tente novamente em instantes."
+            "generic": "Ocorreu um erro ao processar sua solicitação. Por favor, tente novamente.",
+            "timeout": "A consulta demorou mais que o esperado. Tente ser mais específico na consulta.",
+            "no_results": "Não encontrei informações com esses critérios. Tente reformular a consulta.",
+            "database": "No momento estou com dificuldade para acessar os dados. Tente novamente em instantes."
         }
         
         return error_messages.get(error_type, error_messages["generic"])

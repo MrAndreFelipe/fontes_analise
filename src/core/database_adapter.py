@@ -53,12 +53,7 @@ class DatabaseAdapter(ABC):
     
     @abstractmethod
     def search_exact_entities(self, entities: Dict[str, Any], excluded_ids: List[str] = None) -> List[SearchResult]:
-        """
-        Busca exata por entidades no Oracle
-        
-        NOTA: Este método é usado apenas para demonstração/testes (__main__.py).
-        Em produção, use TextToSQLService para geração dinâmica de queries.
-        """
+        """Busca exata por entidades"""
         pass
     
     @abstractmethod
@@ -249,16 +244,32 @@ class PostgreSQLAdapter(DatabaseAdapter):
             return {}
     
     def insert_chunk(self, chunk_data: Dict[str, Any]) -> bool:
-        """Insere chunk no PostgreSQL"""
+        """Insere chunk no PostgreSQL com campos LGPD"""
         try:
             import json
             import psycopg2.extras
+            from datetime import datetime, timedelta
+            
+            # Calcula retention_until se não fornecido
+            retention_until = chunk_data.get('retention_until')
+            if not retention_until and chunk_data.get('data_origem'):
+                # Importa helper para calcular retenção
+                from security.lgpd_audit import map_entity_to_category
+                from security.lgpd_audit import LGPDAuditLogger
+                
+                audit_logger = LGPDAuditLogger(self.connection)
+                data_category = map_entity_to_category(chunk_data.get('entity', 'PEDIDO_VENDA'))
+                retention_until = audit_logger.calculate_retention_date(
+                    data_category,
+                    chunk_data['data_origem']
+                )
             
             query = """
                 INSERT INTO chunks 
                 (chunk_id, content_text, encrypted_content, entity, attributes, periodo, 
-                 nivel_lgpd, hash_sha256, source_file, chunk_size, embedding_model, embedding)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                 nivel_lgpd, hash_sha256, source_file, chunk_size, embedding_model, embedding,
+                 retention_until, data_origem, is_active)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (chunk_id) DO NOTHING
             """
             
@@ -288,7 +299,10 @@ class PostgreSQLAdapter(DatabaseAdapter):
                 chunk_data['source_file'],
                 chunk_data['chunk_size'], 
                 chunk_data.get('embedding_model'), 
-                embedding
+                embedding,
+                retention_until,
+                chunk_data.get('data_origem'),
+                chunk_data.get('is_active', True)
             )
             
             # Executa usando cursor específico para tratar arrays
@@ -435,55 +449,54 @@ class OracleAdapter(DatabaseAdapter):
                 ORDER BY DATA_VENDA DESC
             """,
             
-            # ===== REMOVIDO: Queries analíticas hardcoded =====
-            # Substituidas por Text-to-SQL dinâmico (text_to_sql_service.py)
-            # As queries analytics_* foram removidas pois não são mais utilizadas
-            # O método search_analytics() foi removido
-            # Use o TextToSQLService para gerar queries dinamicamente
-            
-            # ===== CONTAS A PAGAR - DADOS TEXTUAIS =====
+            # Contas a Pagar - Dados textuais
             'cp_textual_data': """
                 SELECT REGISTRO_ID, TEXTO_COMPLETO, NIVEL_LGPD,
-                       DATA_VENCIMENTO, DATA_EMISSAO, VALOR_TITULO, VALOR_SALDO,
+                       DATA_VENCIMENTO, VALOR_TITULO, VALOR_SALDO,
                        NOME_FORNECEDOR, CNPJ_FORNECEDOR, TITULO,
-                       DESCRICAO_GRUPO, DESCRICAO_SUBGRUPO, DESCRICAO_BANCO
+                       DATA_EMISSAO, DESCRICAO_GRUPO, DESCRICAO_SUBGRUPO,
+                       DESCRICAO_BANCO
                 FROM INDUSTRIAL.VW_RAG_CONTAS_PAGAR_TEXTUAL
-                WHERE DATA_EMISSAO >= :data_inicio
+                WHERE DATA_VENCIMENTO >= :data_inicio
                 AND ROWNUM <= :max_rows
                 ORDER BY DATA_VENCIMENTO DESC
             """,
             
-            # ===== CONTAS A RECEBER - DADOS TEXTUAIS =====
-            'cr_textual_data': """
-                SELECT REGISTRO_ID, TEXTO_COMPLETO, NIVEL_LGPD,
-                       DATA_VENCIMENTO, DATA_EMISSAO, VALOR_DUPLICATA AS VALOR_TITULO, SALDO,
-                       NOME_CLIENTE, CNPJ_CLIENTE, FATURA, ORDEM,
-                       NOME_REPRESENTANTE, SITUACAO_DUPLICATA, DESCRICAO_BANCO, OPERACAO
-                FROM INDUSTRIAL.VW_RAG_CONTAS_RECEBER_TEXTUAL
-                WHERE DATA_EMISSAO >= :data_inicio
-                AND ROWNUM <= :max_rows
-                ORDER BY DATA_VENCIMENTO DESC
-            """,
-            
-            # ===== CONTAS A PAGAR - RESUMOS AGREGADOS =====
+            # Contas a Pagar - Resumos agregados
             'cp_resumos_agregados': """
-                SELECT REGISTRO_ID, TEXTO_RESUMO, PERIODO, EMPRESA,
-                       VALOR_TOTAL, SALDO_TOTAL, VALOR_MEDIO,
-                       TOTAL_TITULOS, TITULOS_PAGOS, TITULOS_VENCIDOS
+                SELECT REGISTRO_ID, TEXTO_RESUMO, PERIODO,
+                       EMPRESA, VALOR_TOTAL, SALDO_TOTAL,
+                       VALOR_MEDIO, TOTAL_TITULOS, TITULOS_PAGOS,
+                       TITULOS_VENCIDOS
                 FROM INDUSTRIAL.VW_RAG_CP_RESUMOS_AGREGADOS
                 WHERE PERIODO >= :periodo_inicio
                 ORDER BY PERIODO DESC
             """,
             
-            # ===== CONTAS A RECEBER - RESUMOS AGREGADOS =====
+            # Contas a Receber - Dados textuais
+            'cr_textual_data': """
+                SELECT REGISTRO_ID, TEXTO_COMPLETO, NIVEL_LGPD,
+                       DATA_VENCIMENTO, VALOR_DUPLICATA AS VALOR_TITULO,
+                       SALDO, NOME_CLIENTE, CNPJ_CLIENTE,
+                       NOME_REPRESENTANTE, FATURA, ORDEM,
+                       DATA_EMISSAO, SITUACAO_DUPLICATA, OPERACAO,
+                       DESCRICAO_BANCO
+                FROM INDUSTRIAL.VW_RAG_CONTAS_RECEBER_TEXTUAL
+                WHERE DATA_VENCIMENTO >= :data_inicio
+                AND ROWNUM <= :max_rows
+                ORDER BY DATA_VENCIMENTO DESC
+            """,
+            
+            # Contas a Receber - Resumos agregados
             'cr_resumos_agregados': """
-                SELECT REGISTRO_ID, TEXTO_RESUMO, PERIODO, EMPRESA,
-                       VALOR_TOTAL, SALDO_TOTAL, VALOR_MEDIO,
-                       TOTAL_DUPLICATAS, DUPLICATAS_RECEBIDAS, DUPLICATAS_VENCIDAS
+                SELECT REGISTRO_ID, TEXTO_RESUMO, PERIODO,
+                       EMPRESA, VALOR_TOTAL, SALDO_TOTAL,
+                       VALOR_MEDIO, TOTAL_DUPLICATAS, DUPLICATAS_RECEBIDAS,
+                       DUPLICATAS_VENCIDAS
                 FROM INDUSTRIAL.VW_RAG_CR_RESUMOS_AGREGADOS
                 WHERE PERIODO >= :periodo_inicio
                 ORDER BY PERIODO DESC
-            """,
+            """
         }
     
     def connect(self) -> bool:
@@ -722,7 +735,7 @@ class OracleAdapter(DatabaseAdapter):
             
             # Busca por regiões - usa apenas a PRIMEIRA (prioritária)
             elif 'regiao' in entities:
-                # A primeira região é sempre a prioritária
+                # A primeira região é sempre a prioritária (devido ao processamento no QueryProcessor)
                 regiao_prioritaria = entities['regiao'][0]
                 logger.info(f"Oracle: Usando região prioritária: {regiao_prioritaria}")
                 rows = self.execute_query(
@@ -885,363 +898,6 @@ class OracleAdapter(DatabaseAdapter):
         
         return results
     
-    # Método search_analytics() REMOVIDO - substituido por Text-to-SQL
-    # Use TextToSQLService.generate_and_execute() para consultas analíticas
-    
-    def search_analytics_DEPRECATED(self, intent: Any, entities: Dict[str, Any]) -> List[SearchResult]:
-        """
-        Executa análises analíticas baseadas na intenção da consulta
-        
-        Args:
-            intent: Objeto QueryIntent com a intenção da consulta
-            entities: Entidades extraídas da consulta
-        
-        Returns:
-            Lista de SearchResult com resultados analíticos
-        """
-        from datetime import datetime
-        
-        results = []
-        intent_type = intent.intent_type if hasattr(intent, 'intent_type') else 'unknown'
-        
-        try:
-            now = datetime.now()
-            
-            # 1. Análises de vendas por período
-            if intent_type in ['analytics_vendas_periodo', 'aggregate_valor']:
-                # Verifica qual período
-                periodo_temporal = entities.get('periodo_temporal', [])
-                
-                # PRIORIDADE 1: Dia específico com data completa (DD/MM/AAAA)
-                if 'data_especifica' in entities:
-                    data = entities['data_especifica'][0]
-                    data_str = data.strftime('%Y-%m-%d')
-                    logger.info(f"Executando análise: VENDAS DIA ESPECÍFICO {data.strftime('%d/%m/%Y')}")
-                    rows = self.execute_query(
-                        self.queries['analytics_vendas_dia_especifico'],
-                        {'data_especifica': data_str}
-                    )
-                    periodo_temporal = [f"dia {data.day:02d}/{data.month:02d}/{data.year}"]
-                
-                # PRIORIDADE 2: Dia específico com mês/ano (dia X do mês Y)
-                elif 'dia_especifico' in entities and 'mes_referencia' in entities and 'ano_referencia' in entities:
-                    dia = entities['dia_especifico'][0]
-                    mes = entities['mes_referencia'][0]
-                    ano = entities['ano_referencia'][0]
-                    
-                    from datetime import date
-                    try:
-                        data = date(ano, mes, dia)
-                        data_str = data.strftime('%Y-%m-%d')
-                        logger.info(f"Executando análise: VENDAS DIA ESPECÍFICO {dia:02d}/{mes:02d}/{ano}")
-                        rows = self.execute_query(
-                            self.queries['analytics_vendas_dia_especifico'],
-                            {'data_especifica': data_str}
-                        )
-                        periodo_temporal = [f"dia {dia:02d}/{mes:02d}/{ano}"]
-                    except:
-                        logger.error(f"Data inválida: {dia}/{mes}/{ano}")
-                        rows = []
-                
-                # PRIORIDADE 3: Hoje
-                elif 'hoje' in periodo_temporal:
-                    logger.info("Executando análise: VENDAS HOJE")
-                    rows = self.execute_query(self.queries['analytics_vendas_hoje'])
-                    
-                # PRIORIDADE 4: Mês atual
-                elif 'mes_atual' in periodo_temporal or 'no mês' in str(entities.get('periodo_temporal', '')):
-                    logger.info("Executando análise: VENDAS MÊS ATUAL")
-                    rows = self.execute_query(self.queries['analytics_vendas_mes_atual'])
-                    
-                # PRIORIDADE 5: Mês/ano específicos (sem dia)
-                elif 'mes_referencia' in entities and 'ano_referencia' in entities and 'dia_especifico' not in entities:
-                    mes = entities['mes_referencia'][0]
-                    ano = entities['ano_referencia'][0]
-                    logger.info(f"Executando análise: VENDAS PERÍODO {mes}/{ano}")
-                    rows = self.execute_query(
-                        self.queries['analytics_vendas_periodo'],
-                        {'mes': mes, 'ano': ano}
-                    )
-                else:
-                    # Default: mês atual
-                    logger.info("Executando análise: VENDAS MÊS ATUAL (default)")
-                    rows = self.execute_query(self.queries['analytics_vendas_mes_atual'])
-                
-                if rows and len(rows) > 0:
-                    row = rows[0]
-                    content = self._format_vendas_analysis(row, periodo_temporal)
-                    
-                    results.append(SearchResult(
-                        chunk_id=f"analytics_vendas_{now.strftime('%Y%m%d%H%M%S')}",
-                        content_text=content,
-                        similarity=1.0,
-                        entity='ANALYTICS_VENDAS',
-                        nivel_lgpd='BAIXO',
-                        metadata={
-                            'tipo_analise': 'vendas_periodo',
-                            'periodo': periodo_temporal[0] if periodo_temporal else 'mes_atual',
-                            'dados': dict(row),
-                            'source': 'oracle_analytics',
-                            'match_type': 'analytics_vendas'
-                        }
-                    ))
-            
-            # 2. Rankings (representantes ou regiões)
-            elif intent_type == 'analytics_ranking':
-                mes = entities.get('mes_referencia', [now.month])[0]
-                ano = entities.get('ano_referencia', [now.year])[0]
-                limite = 10
-                
-                # Verifica se é ranking de representantes ou regiões
-                if any(kw in str(entities).lower() for kw in ['representante', 'vendedor']):
-                    logger.info(f"Executando análise: RANKING REPRESENTANTES {mes}/{ano}")
-                    rows = self.execute_query(
-                        self.queries['analytics_ranking_representantes'],
-                        {'mes': mes, 'ano': ano, 'limite': limite}
-                    )
-                    tipo = 'representantes'
-                else:
-                    logger.info(f"Executando análise: RANKING REGIÕES {mes}/{ano}")
-                    rows = self.execute_query(
-                        self.queries['analytics_ranking_regioes'],
-                        {'mes': mes, 'ano': ano, 'limite': limite}
-                    )
-                    tipo = 'regioes'
-                
-                if rows:
-                    content = self._format_ranking_analysis(rows, tipo, mes, ano)
-                    
-                    results.append(SearchResult(
-                        chunk_id=f"analytics_ranking_{tipo}_{now.strftime('%Y%m%d%H%M%S')}",
-                        content_text=content,
-                        similarity=1.0,
-                        entity='ANALYTICS_RANKING',
-                        nivel_lgpd='BAIXO',
-                        metadata={
-                            'tipo_analise': f'ranking_{tipo}',
-                            'periodo': f"{mes}/{ano}",
-                            'dados': [dict(row) for row in rows],
-                            'source': 'oracle_analytics',
-                            'match_type': f'analytics_ranking_{tipo}'
-                        }
-                    ))
-            
-            # 3. Crescimento/Comparação
-            elif intent_type == 'analytics_crescimento':
-                logger.info("Executando análise: COMPARAÇÃO MENSAL")
-                rows = self.execute_query(self.queries['analytics_comparacao_mensal'])
-                
-                if rows and len(rows) > 0:
-                    row = rows[0]
-                    content = self._format_crescimento_analysis(row)
-                    
-                    results.append(SearchResult(
-                        chunk_id=f"analytics_crescimento_{now.strftime('%Y%m%d%H%M%S')}",
-                        content_text=content,
-                        similarity=1.0,
-                        entity='ANALYTICS_CRESCIMENTO',
-                        nivel_lgpd='BAIXO',
-                        metadata={
-                            'tipo_analise': 'crescimento_mensal',
-                            'dados': dict(row),
-                            'source': 'oracle_analytics',
-                            'match_type': 'analytics_crescimento'
-                        }
-                    ))
-            
-            # 4. Projeção
-            elif intent_type == 'analytics_projecao':
-                logger.info("Executando análise: PROJEÇÃO MÊS")
-                rows = self.execute_query(self.queries['analytics_projecao_mes'])
-                
-                if rows and len(rows) > 0:
-                    row = rows[0]
-                    content = self._format_projecao_analysis(row)
-                    
-                    results.append(SearchResult(
-                        chunk_id=f"analytics_projecao_{now.strftime('%Y%m%d%H%M%S')}",
-                        content_text=content,
-                        similarity=1.0,
-                        entity='ANALYTICS_PROJECAO',
-                        nivel_lgpd='BAIXO',
-                        metadata={
-                            'tipo_analise': 'projecao',
-                            'dados': dict(row),
-                            'source': 'oracle_analytics',
-                            'match_type': 'analytics_projecao'
-                        }
-                    ))
-            
-            # 5. Informações de representante
-            elif 'representante' in entities:
-                representante = entities['representante'][0]
-                mes = entities.get('mes_referencia', [now.month])[0]
-                ano = entities.get('ano_referencia', [now.year])[0]
-                
-                logger.info(f"Executando análise: REPRESENTANTE {representante}")
-                rows = self.execute_query(
-                    self.queries['analytics_representante_periodo'],
-                    {
-                        'representante_pattern': f'%{representante}%',
-                        'mes': mes,
-                        'ano': ano
-                    }
-                )
-                
-                if rows:
-                    row = rows[0]
-                    content = self._format_representante_analysis(row, mes, ano)
-                    
-                    results.append(SearchResult(
-                        chunk_id=f"analytics_representante_{now.strftime('%Y%m%d%H%M%S')}",
-                        content_text=content,
-                        similarity=1.0,
-                        entity='ANALYTICS_REPRESENTANTE',
-                        nivel_lgpd='MEDIO',
-                        metadata={
-                            'tipo_analise': 'representante_periodo',
-                            'representante': representante,
-                            'periodo': f"{mes}/{ano}",
-                            'dados': dict(row),
-                            'source': 'oracle_analytics',
-                            'match_type': 'analytics_representante'
-                        }
-                    ))
-        
-        except Exception as e:
-            logger.error(f"Erro na análise analítica: {e}")
-            logger.error(f"Intent type: {intent_type}")
-            logger.error(f"Entities: {entities}")
-        
-        return results
-    
-    # Métodos de formatação REMOVIDOS - usados apenas por search_analytics (deprecated)
-    
-    def _format_vendas_analysis_DEPRECATED(self, data: Dict, periodo: List[str]) -> str:
-        """Formata resultado de análise de vendas"""
-        periodo_str = periodo[0] if periodo else 'mês atual'
-        
-        # Trata valores NULL
-        total_pedidos = data.get('total_pedidos', 0) or 0
-        valor_total = float(data.get('valor_total') or 0)
-        ticket_medio = float(data.get('ticket_medio') or 0)
-        maior_venda = float(data.get('maior_venda') or 0)
-        menor_venda = float(data.get('menor_venda') or 0)
-        clientes_distintos = data.get('clientes_distintos', 0) or 0
-        
-        # Se não há vendas
-        if total_pedidos == 0:
-            return (
-                f"Análise de Vendas - {periodo_str.upper()}:\n"
-                f"\nNenhuma venda encontrada para este período.\n"
-                f"Período: {periodo_str}\n"
-                f"Status: Sem movimentação"
-            )
-        
-        return (
-            f"Análise de Vendas - {periodo_str.upper()}:\n"
-            f"Total de Pedidos: {total_pedidos}\n"
-            f"Valor Total: R$ {valor_total:,.2f}\n"
-            f"Ticket Médio: R$ {ticket_medio:,.2f}\n"
-            f"Maior Venda: R$ {maior_venda:,.2f}\n"
-            f"Menor Venda: R$ {menor_venda:,.2f}\n"
-            f"Clientes Distintos: {clientes_distintos}"
-        )
-    
-    def _format_ranking_analysis_DEPRECATED(self, rows: List[Dict], tipo: str, mes: int, ano: int) -> str:
-        """Formata resultado de ranking"""
-        titulo = "Representantes" if tipo == 'representantes' else "Regiões"
-        campo = 'nome_representante' if tipo == 'representantes' else 'regiao'
-        
-        if not rows:
-            return (
-                f"Ranking de {titulo} - {mes:02d}/{ano}:\n\n"
-                f"Nenhum dado encontrado para este período.\n"
-                f"Verifique se há vendas no mês {mes:02d}/{ano}."
-            )
-        
-        content = f"Ranking de {titulo} - {mes:02d}/{ano}:\n\n"
-        
-        for i, row in enumerate(rows, 1):
-            nome = row.get(campo, 'N/A')
-            valor = float(row.get('valor_total') or 0)
-            pedidos = row.get('total_pedidos', 0) or 0
-            content += f"{i}o. {nome}:\n"
-            content += f"   Valor: R$ {valor:,.2f} | Pedidos: {pedidos}\n"
-        
-        return content
-    
-    def _format_crescimento_analysis_DEPRECATED(self, data: Dict) -> str:
-        """Formata resultado de crescimento"""
-        valor_atual = float(data.get('valor_mes_atual') or 0)
-        valor_anterior = float(data.get('valor_mes_anterior') or 0)
-        crescimento = float(data.get('crescimento_percentual') or 0)
-        pedidos_atual = data.get('pedidos_mes_atual', 0) or 0
-        pedidos_anterior = data.get('pedidos_mes_anterior', 0) or 0
-        
-        # Se não há dados
-        if valor_atual == 0 and valor_anterior == 0:
-            return (
-                f"Comparação Mensal:\n"
-                f"\nNenhum dado encontrado para comparação.\n"
-                f"Verifique se há vendas no mês atual e anterior."
-            )
-        
-        status = "crescimento" if crescimento > 0 else "redução"
-        
-        return (
-            f"Comparação Mensal:\n"
-            f"Mês Atual: R$ {valor_atual:,.2f} ({pedidos_atual} pedidos)\n"
-            f"Mês Anterior: R$ {valor_anterior:,.2f} ({pedidos_anterior} pedidos)\n"
-            f"{status.capitalize()}: {abs(crescimento):.2f}%"
-        )
-    
-    def _format_projecao_analysis_DEPRECATED(self, data: Dict) -> str:
-        """Formata resultado de projeção"""
-        media = float(data.get('media_ultimos_6_meses') or 0)
-        minimo = float(data.get('valor_minimo') or 0)
-        maximo = float(data.get('valor_maximo') or 0)
-        meses = data.get('meses_analisados', 0) or 0
-        
-        if media == 0 or meses == 0:
-            return (
-                f"Projeção:\n"
-                f"\nNão há dados suficientes para projeção.\n"
-                f"São necessários dados dos últimos 6 meses."
-            )
-        
-        return (
-            f"Projeção baseada nos últimos {meses} meses:\n"
-            f"Média Móvel: R$ {media:,.2f}\n"
-            f"Faixa: R$ {minimo:,.2f} - R$ {maximo:,.2f}\n"
-            f"Projeção para o mês: R$ {media:,.2f}"
-        )
-    
-    def _format_representante_analysis_DEPRECATED(self, data: Dict, mes: int, ano: int) -> str:
-        """Formata resultado de análise de representante"""
-        nome = data.get('nome_representante', 'N/A')
-        total_pedidos = data.get('total_pedidos', 0) or 0
-        valor_total = float(data.get('valor_total') or 0)
-        ticket_medio = float(data.get('ticket_medio') or 0)
-        clientes = data.get('clientes_atendidos', 0) or 0
-        regioes = data.get('regioes_atendidas', 0) or 0
-        
-        if total_pedidos == 0:
-            return (
-                f"Desempenho de {nome} em {mes:02d}/{ano}:\n"
-                f"\nNenhuma venda encontrada para este representante no período.\n"
-                f"Status: Sem movimentação"
-            )
-        
-        return (
-            f"Desempenho de {nome} em {mes:02d}/{ano}:\n"
-            f"Total de Pedidos: {total_pedidos}\n"
-            f"Valor Total: R$ {valor_total:,.2f}\n"
-            f"Ticket Médio: R$ {ticket_medio:,.2f}\n"
-            f"Clientes Atendidos: {clientes}\n"
-            f"Regiões Atendidas: {regioes}"
-        )
-    
     def test_connection(self) -> Dict[str, Any]:
         """Testa conexão e views Oracle"""
         test_results = {
@@ -1259,9 +915,9 @@ class OracleAdapter(DatabaseAdapter):
                 
                 # Testa cada view
                 views_to_test = {
-                    'VW_RAG_VENDAS_ESTRUTURADA': 'SELECT COUNT(*) as count FROM ANDREF.VW_RAG_VENDAS_ESTRUTURADA WHERE ROWNUM <= 1',
-                    'VW_RAG_VENDAS_TEXTUAL': 'SELECT COUNT(*) as count FROM ANDREF.VW_RAG_VENDAS_TEXTUAL WHERE ROWNUM <= 1',
-                    'VW_RAG_RESUMOS_AGREGADOS': 'SELECT COUNT(*) as count FROM ANDREF.VW_RAG_RESUMOS_AGREGADOS WHERE ROWNUM <= 1'
+                    'VW_RAG_VENDAS_ESTRUTURADA': 'SELECT COUNT(*) as count FROM INDUSTRIAL.VW_RAG_VENDAS_ESTRUTURADA WHERE ROWNUM <= 1',
+                    'VW_RAG_VENDAS_TEXTUAL': 'SELECT COUNT(*) as count FROM INDUSTRIAL.VW_RAG_VENDAS_TEXTUAL WHERE ROWNUM <= 1',
+                    'VW_RAG_RESUMOS_AGREGADOS': 'SELECT COUNT(*) as count FROM INDUSTRIAL.VW_RAG_RESUMOS_AGREGADOS WHERE ROWNUM <= 1'
                 }
                 
                 for view_name, test_query in views_to_test.items():
@@ -1277,7 +933,7 @@ class OracleAdapter(DatabaseAdapter):
                 # Busca dados de exemplo
                 try:
                     sample = self.execute_query(
-                        "SELECT NUMERO_PEDIDO, NOME_CLIENTE, VALOR_ITEM_LIQUIDO FROM ANDREF.VW_RAG_VENDAS_ESTRUTURADA WHERE ROWNUM <= 3"
+                        "SELECT NUMERO_PEDIDO, NOME_CLIENTE, VALOR_ITEM_LIQUIDO FROM INDUSTRIAL.VW_RAG_VENDAS_ESTRUTURADA WHERE ROWNUM <= 3"
                     )
                     test_results['sample_data'] = sample
                 except Exception as e:

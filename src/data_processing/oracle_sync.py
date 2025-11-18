@@ -16,8 +16,8 @@ import time
 sys.path.append(str(Path(__file__).parent.parent))
 
 from core.database_adapter import DatabaseConfig, DatabaseAdapterFactory
-from data_processing.data_processor import DataProcessor
 from data_processing.embeddings import EmbeddingGenerator
+from security.encryption import AES256Encryptor
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -41,8 +41,15 @@ class OracleToPostgreSQLSync:
         self.postgres_adapter = None
         
         # Componentes de processamento
-        self.data_processor = DataProcessor(use_encryption=True)
         self.embedding_generator = EmbeddingGenerator()
+        
+        # Encryptor AES-256-GCM para chunks sensíveis
+        try:
+            self.encryptor = AES256Encryptor()
+            logger.info("Criptografia AES-256-GCM habilitada para sincronização")
+        except ValueError as e:
+            logger.warning(f"Criptografia desabilitada: {e}")
+            self.encryptor = None
         
         # Estatísticas
         self.sync_stats = {
@@ -157,6 +164,11 @@ class OracleToPostgreSQLSync:
                         chunk_data['embedding_model'] = self.embedding_generator.model_name
                         self.sync_stats['embeddings_generated'] += 1
                     
+                    # Criptografia para dados sensíveis (LGPD ALTO/MEDIO)
+                    encrypted_content = self._encrypt_if_needed(row['texto_completo'], row['nivel_lgpd'])
+                    if encrypted_content:
+                        chunk_data['encrypted_content'] = encrypted_content
+                    
                     # Calcula hash
                     import hashlib
                     content_hash = hashlib.sha256(row['texto_completo'].encode()).hexdigest()
@@ -249,6 +261,11 @@ class OracleToPostgreSQLSync:
                         embedding = self.embedding_generator.generate_embedding(row['texto_resumo'])
                         chunk_data['embedding'] = embedding
                         chunk_data['embedding_model'] = self.embedding_generator.model_name
+                    
+                    # Criptografia (dados agregados geralmente são BAIXO, mas verifica)
+                    encrypted_content = self._encrypt_if_needed(row['texto_resumo'], 'BAIXO')
+                    if encrypted_content:
+                        chunk_data['encrypted_content'] = encrypted_content
                     
                     # Calcula hash
                     import hashlib
@@ -343,6 +360,11 @@ class OracleToPostgreSQLSync:
                         chunk_data['embedding'] = embedding
                         chunk_data['embedding_model'] = self.embedding_generator.model_name
                         self.sync_stats['embeddings_generated'] += 1
+                    
+                    # Criptografia para dados sensíveis (LGPD ALTO/MEDIO)
+                    encrypted_content = self._encrypt_if_needed(row['texto_completo'], row['nivel_lgpd'])
+                    if encrypted_content:
+                        chunk_data['encrypted_content'] = encrypted_content
                     
                     # Calcula hash
                     import hashlib
@@ -456,6 +478,11 @@ class OracleToPostgreSQLSync:
                         chunk_data['embedding_model'] = self.embedding_generator.model_name
                         self.sync_stats['embeddings_generated'] += 1
                     
+                    # Criptografia para dados sensíveis (LGPD ALTO/MEDIO)
+                    encrypted_content = self._encrypt_if_needed(row['texto_completo'], row['nivel_lgpd'])
+                    if encrypted_content:
+                        chunk_data['encrypted_content'] = encrypted_content
+                    
                     # Calcula hash
                     import hashlib
                     content_hash = hashlib.sha256(row['texto_completo'].encode()).hexdigest()
@@ -557,6 +584,11 @@ class OracleToPostgreSQLSync:
                         chunk_data['embedding'] = embedding
                         chunk_data['embedding_model'] = self.embedding_generator.model_name
                     
+                    # Criptografia (dados agregados geralmente são BAIXO)
+                    encrypted_content = self._encrypt_if_needed(row['texto_resumo'], 'BAIXO')
+                    if encrypted_content:
+                        chunk_data['encrypted_content'] = encrypted_content
+                    
                     # Calcula hash
                     import hashlib
                     content_hash = hashlib.sha256(row['texto_resumo'].encode()).hexdigest()
@@ -642,6 +674,11 @@ class OracleToPostgreSQLSync:
                         chunk_data['embedding'] = embedding
                         chunk_data['embedding_model'] = self.embedding_generator.model_name
                     
+                    # Criptografia (dados agregados geralmente são BAIXO)
+                    encrypted_content = self._encrypt_if_needed(row['texto_resumo'], 'BAIXO')
+                    if encrypted_content:
+                        chunk_data['encrypted_content'] = encrypted_content
+                    
                     # Calcula hash
                     import hashlib
                     content_hash = hashlib.sha256(row['texto_resumo'].encode()).hexdigest()
@@ -666,10 +703,12 @@ class OracleToPostgreSQLSync:
             return False
     
     def cleanup_old_embeddings(self, days_old: int = 90) -> int:
-        """Remove embeddings antigos do PostgreSQL"""
+        """Remove embeddings antigos do PostgreSQL com log LGPD"""
         logger.info(f"Removendo embeddings antigos (>{days_old} dias)")
         
         try:
+            from security.lgpd_audit import LGPDAuditLogger
+            
             cutoff_date = datetime.now() - timedelta(days=days_old)
             
             result = self.postgres_adapter.execute_query(
@@ -684,6 +723,22 @@ class OracleToPostgreSQLSync:
             
             removed_count = len(result) if result else 0
             logger.info(f"Removidos {removed_count} chunks antigos")
+            
+            # Log LGPD Art. 18 (exclusão)
+            if removed_count > 0 and self.postgres_adapter.connection:
+                audit_logger = LGPDAuditLogger(self.postgres_adapter.connection)
+                audit_logger.log_deletion(
+                    deletion_type='retention_cleanup',
+                    affected_table='chunks',
+                    records_deleted=removed_count,
+                    deletion_reason=f'Limpeza automática - dados > {days_old} dias',
+                    criteria_used={
+                        'source_files': ['oracle_sync', 'oracle_aggregated'],
+                        'cutoff_date': cutoff_date.isoformat(),
+                        'days_old': days_old
+                    },
+                    requested_by='system'
+                )
             
             return removed_count
             
@@ -760,6 +815,37 @@ class OracleToPostgreSQLSync:
                 logger.info(f"  - {error}")
         
         logger.info("=" * 60)
+    
+    def _encrypt_if_needed(self, content: str, nivel_lgpd: str) -> Optional[bytes]:
+        """
+        Criptografia AES-256-GCM para chunks sensíveis durante sincronização
+        
+        Args:
+            content: Conteúdo do chunk
+            nivel_lgpd: Nível LGPD (ALTO, MEDIO, BAIXO)
+        
+        Returns:
+            bytes: Conteúdo criptografado ou None se não for necessário
+        
+        Política:
+        - ALTO: Criptografa (dados pessoais - CNPJ, nome cliente)
+        - MEDIO: Criptografa (dados financeiros sensíveis)
+        - BAIXO: Não criptografa (dados agregados/públicos)
+        """
+        if not self.encryptor:
+            return None
+        
+        # Só criptografa dados ALTO ou MEDIO
+        if nivel_lgpd not in ['ALTO', 'MÉDIO', 'MEDIO']:
+            return None
+        
+        try:
+            encrypted_bytes = self.encryptor.encrypt(content)
+            logger.debug(f"Chunk criptografado: {len(content)} chars → {len(encrypted_bytes)} bytes (LGPD: {nivel_lgpd})")
+            return encrypted_bytes
+        except Exception as e:
+            logger.error(f"Erro ao criptografar chunk: {e}")
+            return None
     
     def disconnect(self):
         """Desconecta dos bancos de dados"""

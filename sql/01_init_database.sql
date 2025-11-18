@@ -28,6 +28,11 @@ CREATE TABLE IF NOT EXISTS chunks (
     embedding vector(1536),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    -- Campos LGPD
+    retention_until TIMESTAMP WITH TIME ZONE,
+    data_origem TIMESTAMP WITH TIME ZONE,
+    deleted_at TIMESTAMP WITH TIME ZONE,
+    is_active BOOLEAN DEFAULT TRUE,
     CONSTRAINT chunks_chunk_size_positive CHECK (chunk_size > 0),
     CONSTRAINT chunks_embedding_not_null CHECK (embedding IS NOT NULL)
 );
@@ -53,7 +58,7 @@ CREATE TABLE IF NOT EXISTS processing_stats (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
--- Tabela de auditoria LGPD
+-- Tabela de auditoria LGPD (classificação de chunks)
 CREATE TABLE IF NOT EXISTS lgpd_audit (
     id SERIAL PRIMARY KEY,
     chunk_id TEXT NOT NULL REFERENCES chunks(chunk_id) ON DELETE CASCADE,
@@ -65,6 +70,50 @@ CREATE TABLE IF NOT EXISTS lgpd_audit (
     access_restrictions JSONB,
     classified_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     classified_by TEXT DEFAULT 'system'
+);
+
+-- Tabela de log de acesso (LGPD Art. 37 - Auditoria)
+CREATE TABLE IF NOT EXISTS access_log (
+    id SERIAL PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    user_name TEXT,
+    user_clearance TEXT NOT NULL CHECK (user_clearance IN ('ALTO', 'MÉDIO', 'BAIXO')),
+    query_text TEXT NOT NULL,
+    query_classification TEXT NOT NULL,
+    route_used TEXT NOT NULL CHECK (route_used IN ('text_to_sql', 'embeddings', 'cache', 'error')),
+    chunks_accessed TEXT[],
+    success BOOLEAN NOT NULL DEFAULT FALSE,
+    denied_reason TEXT,
+    processing_time_ms INTEGER,
+    accessed_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Tabela de log de exclusões LGPD (Art. 18)
+CREATE TABLE IF NOT EXISTS lgpd_deletion_log (
+    id SERIAL PRIMARY KEY,
+    deletion_type TEXT NOT NULL CHECK (deletion_type IN ('retention_cleanup', 'erasure_request', 'manual', 'anonymization')),
+    affected_table TEXT NOT NULL,
+    records_deleted INTEGER NOT NULL,
+    deletion_reason TEXT NOT NULL,
+    criteria_used JSONB,
+    requested_by TEXT,
+    approved_by TEXT,
+    executed_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    evidence_backup_location TEXT
+);
+
+-- Tabela de política de retenção LGPD
+CREATE TABLE IF NOT EXISTS lgpd_retention_policy (
+    id SERIAL PRIMARY KEY,
+    data_category TEXT NOT NULL UNIQUE,
+    retention_days INTEGER NOT NULL CHECK (retention_days > 0),
+    legal_basis TEXT NOT NULL,
+    active BOOLEAN DEFAULT TRUE,
+    last_review_date DATE,
+    next_review_date DATE,
+    notes TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
 
 -- ÍNDICES (só criar após tabelas existirem)
@@ -79,6 +128,8 @@ CREATE INDEX IF NOT EXISTS idx_chunks_entity ON chunks(entity);
 CREATE INDEX IF NOT EXISTS idx_chunks_source_file ON chunks(source_file);
 CREATE INDEX IF NOT EXISTS idx_chunks_created_at ON chunks(created_at);
 CREATE INDEX IF NOT EXISTS idx_chunks_hash ON chunks(hash_sha256);
+CREATE INDEX IF NOT EXISTS idx_chunks_active ON chunks(is_active) WHERE is_active = TRUE;
+CREATE INDEX IF NOT EXISTS idx_chunks_retention ON chunks(retention_until) WHERE retention_until IS NOT NULL;
 
 -- Índices para busca textual
 CREATE INDEX IF NOT EXISTS idx_chunks_content_gin 
@@ -87,6 +138,15 @@ ON chunks USING gin(to_tsvector('portuguese', content_text));
 -- Índices para auditoria LGPD
 CREATE INDEX IF NOT EXISTS idx_lgpd_audit_chunk_id ON lgpd_audit(chunk_id);
 CREATE INDEX IF NOT EXISTS idx_lgpd_audit_level ON lgpd_audit(classification_level);
+
+-- Índices para access_log
+CREATE INDEX IF NOT EXISTS idx_access_log_user ON access_log(user_id);
+CREATE INDEX IF NOT EXISTS idx_access_log_date ON access_log(accessed_at);
+CREATE INDEX IF NOT EXISTS idx_access_log_clearance ON access_log(user_clearance);
+
+-- Índices para lgpd_deletion_log
+CREATE INDEX IF NOT EXISTS idx_deletion_log_date ON lgpd_deletion_log(executed_at);
+CREATE INDEX IF NOT EXISTS idx_deletion_log_type ON lgpd_deletion_log(deletion_type);
 
 -- TRIGGER para atualizar updated_at automaticamente
 CREATE OR REPLACE FUNCTION update_updated_at_column()
@@ -179,15 +239,37 @@ INSERT INTO processing_stats (
     'initial_setup', 0, 0, 0, 0.0, 'setup', 'text-embedding-3-small'
 ) ON CONFLICT DO NOTHING;
 
+-- Inserir políticas de retenção LGPD
+INSERT INTO lgpd_retention_policy (data_category, retention_days, legal_basis, notes) VALUES
+('vendas', 1825, 'Código Comercial Art. 1.196', '5 anos - Dados comerciais'),
+('contas_pagar', 1825, 'Legislação Tributária (Lei 8.137/1990)', '5 anos - Obrigação fiscal'),
+('contas_receber', 1825, 'Legislação Tributária', '5 anos - Obrigação fiscal'),
+('access_logs', 180, 'LGPD Art. 37', '6 meses - Logs de auditoria'),
+('user_sessions', 180, 'LGPD Art. 15', '6 meses - Sessões de usuários inativos')
+ON CONFLICT (data_category) DO NOTHING;
+
 -- Log de inicialização
 DO $$
 BEGIN
+    RAISE NOTICE '============================================================';
     RAISE NOTICE 'Database RAG Cativa Têxtil inicializado com sucesso!';
+    RAISE NOTICE '============================================================';
     RAISE NOTICE 'Extensão PGVector: %', 
         CASE WHEN EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'vector') 
              THEN 'INSTALADA' 
              ELSE 'NÃO ENCONTRADA' 
         END;
-    RAISE NOTICE 'Tabelas criadas: chunks, processing_stats, lgpd_audit';
+    RAISE NOTICE '';
+    RAISE NOTICE 'Tabelas criadas:';
+    RAISE NOTICE '  - chunks (com campos LGPD: retention_until, data_origem, is_active)';
+    RAISE NOTICE '  - processing_stats';
+    RAISE NOTICE '  - lgpd_audit';
+    RAISE NOTICE '  - access_log (auditoria de acesso - Art. 37)';
+    RAISE NOTICE '  - lgpd_deletion_log (log de exclusões - Art. 18)';
+    RAISE NOTICE '  - lgpd_retention_policy (políticas de retenção)';
+    RAISE NOTICE '';
+    RAISE NOTICE 'Conformidade LGPD: ATIVA';
+    RAISE NOTICE 'Retenção de dados: Vendas/CP/CR = 5 anos | Logs = 6 meses';
+    RAISE NOTICE '============================================================';
     RAISE NOTICE 'Pronto para receber dados!';
 END $$;

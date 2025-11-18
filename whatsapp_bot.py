@@ -83,7 +83,7 @@ class GracefulShutdown:
         """Handler para sinais de shutdown"""
         signal_name = 'SIGINT' if signum == signal.SIGINT else 'SIGTERM'
         logger.warning(f"Received {signal_name}, initiating graceful shutdown...")
-        print(f"\n\n⚠️  {signal_name} recebido. Finalizando processamento...")
+        print(f"\n\n  {signal_name} recebido. Finalizando processamento...")
         self.shutdown_requested = True
     
     def should_shutdown(self):
@@ -200,7 +200,7 @@ def main():
     print("BOT INICIADO!")
     print("=" * 80)
     print("\nAguardando mensagens do WhatsApp...")
-    print("Pressione Ctrl+C para encerrar graciosamente.")
+    print("Pressione Ctrl+C para encerrar")
     print()
     
     # Store RAG engine reference for cleanup
@@ -247,12 +247,12 @@ def main():
         print("FINALIZANDO SISTEMA...")
         print("=" * 80)
         
-        logger.info("Starting graceful shutdown sequence")
+        logger.info("Starting shutdown sequence")
         
         # 1. Fecha connection pools
         if rag_engine:
             try:
-                print("✓ Fechando connection pools...")
+                print("Fechando connection pools...")
                 rag_engine.close()
                 logger.info("Connection pools closed")
             except Exception as e:
@@ -260,14 +260,15 @@ def main():
         
         # 2. Aguarda thread do webhook (timeout 5s)
         if webhook_thread.is_alive():
-            print("✓ Aguardando webhook thread...")
+            print("Aguardando webhook thread...")
             webhook_thread.join(timeout=5)
             if webhook_thread.is_alive():
                 logger.warning("Webhook thread did not stop in time")
         
-        print("✓ Shutdown completo")
-        logger.info("Graceful shutdown completed")
+        print("Shutdown completo")
+        logger.info("Shutdown completed")
         print("\nSistema encerrado com sucesso.\n")
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
+

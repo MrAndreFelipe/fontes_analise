@@ -113,6 +113,27 @@ class MessageHandler:
             
             logger.info(f"Processing message from {sender}: {message_text[:50]}...")
             
+            # Check if user is authorized (in whatsapp_users.json)
+            user_context = self.authorization.get_user_context(sender)
+
+            if not user_context:
+                return
+
+            if not user_context.get('enabled', False):
+                logger.warning(f"Unauthorized user {sender} attempted to message bot")
+                
+                unauthorized_message = (
+                    "Desculpe, seu número não está autorizado para usar este bot.\n\n"
+                    "Entre em contato com o administrador para solicitar acesso."
+                )
+                
+                try:
+                    self.evolution_client.send_text_message(sender, unauthorized_message)
+                except Exception as e:
+                    logger.error(f"Failed to send unauthorized message: {e}")
+                
+                return
+            
             # Check rate limiting
             if not self.rate_limiter.is_allowed(sender):
                 retry_after = self.rate_limiter.get_retry_after(sender)
@@ -140,9 +161,6 @@ class MessageHandler:
             if self.enable_typing_indicator:
                 self.evolution_client.send_typing_indicator(sender, True)
             
-            # Get user context from authorization system
-            user_context = self.authorization.get_user_context(sender)
-            
             logger.info(f"User {sender} - Clearance: {user_context.get('lgpd_clearance')}, "
                        f"Name: {user_context.get('user_name')}, "
                        f"Admin: {user_context.get('is_admin')}")
@@ -168,7 +186,7 @@ class MessageHandler:
             rag_response = self.rag_engine.process_query(
                 message_text, 
                 user_context=user_context,
-                conversation_history=recent_context  # NEW: Pass conversation context
+                conversation_history=recent_context  # Pass conversation context
             )
             processing_time = time.time() - start_time
             
@@ -198,7 +216,7 @@ class MessageHandler:
             try:
                 sender = payload.get('data', {}).get('key', {}).get('remoteJid', '')
                 if sender:
-                    error_msg = "Ops! Algo deu errado ao processar sua mensagem. Por favor, tente novamente."
+                    error_msg = "Ocorreu um erro ao processar sua mensagem. Por favor, tente novamente."
                     self.evolution_client.send_text_message(sender, error_msg)
             except:
                 pass
