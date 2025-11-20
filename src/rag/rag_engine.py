@@ -36,6 +36,7 @@ from psycopg2.extras import RealDictCursor
 
 # Connection Pool for production
 from core.connection_pool import DatabaseConnectionPool
+from monitoring import get_metrics_collector
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +175,9 @@ class RAGEngine:
         self.cache = {}
         self.cache_ttl = 3600  # 1 hour
         
+        # Metrics collector
+        self.metrics_collector = get_metrics_collector()
+        
         logger.info("RAG Engine initialized (simplified architecture)")
         logger.info(f"- LGPD: Enabled")
         logger.info(f"- Text-to-SQL: {'Enabled' if self.text_to_sql else 'Disabled'}")
@@ -239,6 +243,8 @@ class RAGEngine:
                     self._audit_query(query, lgpd_classification, sql_response, user_context)
                     # Log acesso LGPD
                     self._log_access_lgpd(query, lgpd_classification, sql_response, user_context, start_time)
+                    # Record metrics
+                    self._record_metrics(query, lgpd_classification, sql_response, user_context, start_time)
                     return sql_response
                 logger.warning("Text-to-SQL returned no results")
             
@@ -251,6 +257,8 @@ class RAGEngine:
                 self._audit_query(query, lgpd_classification, embedding_response, user_context)
                 # Log acesso LGPD
                 self._log_access_lgpd(query, lgpd_classification, embedding_response, user_context, start_time)
+                # Record metrics
+                self._record_metrics(query, lgpd_classification, embedding_response, user_context, start_time)
                 return embedding_response
             
             # Step 5: No results from any route
@@ -720,6 +728,25 @@ class RAGEngine:
             logger.error(f"Erro ao descriptografar chunk {chunk_row.get('chunk_id')}: {e}")
             # Fallback para texto não criptografado
             return chunk_row.get('content_text', '[ERRO: Conteúdo criptografado ilegível]')
+    
+    def _record_metrics(self, query: str, lgpd: LGPDClassification, 
+                       response: RAGResponse, user_context: Optional[Dict], start_time: float):
+        """Registra métricas da query processada"""
+        try:
+            latency_ms = (time.time() - start_time) * 1000
+            
+            self.metrics_collector.record_query(
+                query_text=query[:100],  # Truncate for privacy
+                lgpd_level=lgpd.level.value,
+                route_used=response.metadata.get('route', 'unknown'),
+                success=response.success,
+                latency_ms=latency_ms,
+                user_id=user_context.get('user_id') if user_context else None,
+                error=None if response.success else response.metadata.get('error'),
+                tokens_used=response.metadata.get('tokens_used')
+            )
+        except Exception as e:
+            logger.error(f"Error recording metrics: {e}")
     
     def close(self):
         """Close database connections and connection pools"""
